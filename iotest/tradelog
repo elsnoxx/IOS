@@ -1,0 +1,165 @@
+# !/bin/sh
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC="en_US.UTF-8"
+
+print_help()
+{
+	echo " "
+	echo "Usage: tradelog [-hl--help]"
+	echo "	     tradelog [FILTER] [PŘÍKAZ] [LOG1 [LOG2 [...]]]"
+	echo " "
+	echo "PŘÍKAZ"
+	echo "	list-tick		výpis seznamu vyskytujících se burzovních symbolů, tzv. tickerů"
+	echo "	profit			výpis celkového zisku z uzavřených pozic"
+	echo "	pos			výpis hodnot aktuálně držených pozic seřazené sestupně podel hodnoty"
+	echo "	last-price		výpis poslední známé ceny pro každý ticker"
+	echo "	hist-ord		vípis histogramu počtu transakcí dle tickeru"
+	echo "	graph-post		výpis grafu hodnot držených pozic dle tickeru"
+	echo " "
+	echo "FILTR"
+	echo "	-a	DATETIME	after - jsou uvažonávy pouze záznamy PO tomto datu"
+	echo "	-b	DATETIME	before - jsou uvažovány pouze záznamy PŘED tímto datem"
+	echo "	-t	TICKER		jsou uvažovány pouze záznamy odpovídající danému ticekru"
+	echo "	-w	WIDHT		u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku"
+	echo " "
+}
+
+A=""
+B=""
+W=""
+T=()
+
+if [[ $1 == "--help" || $1 == "-h" ]]; then
+	print_help
+	exit
+fi
+
+while getopts "a:b:t:w:" o; do
+    case $o in
+        (a) A=$OPTARG;;
+        (b) B=$OPTARG;;
+        (w) W=$OPTARG;;
+        (t) T+=($OPTARG);;
+    esac
+done
+shift "$((OPTIND - 1))"
+
+in=""
+
+# Jit pres vsechny zbyvajici argumenty, ktere nezachytil
+while test $# -gt 0; do
+    if [[ $1 == *.log ]]; then
+        in=`cat $1` 
+    elif [[ $1 == *.gz ]]; then
+        in=`zcat $1`
+    else
+        com=$1 
+    fi
+    shift
+done
+
+# Pokud jsme nedostali zadny vstupni soubor, tak vezeme od uzivatele
+if [ -z "$in" ]; then 
+    in=`cat`
+fi
+
+data=""
+tmp=""
+
+for t in ${T[*]} 
+	do  
+		t="$t"
+		out=$(echo "$in" | awk -F ';' -v f="$t" '{if($2==f){print $0}}')
+		if [ -z "$data" ]; then
+			data="$out"
+		else
+			data="$data\n$out"        
+		fi
+	data=$(printf "$data" | awk -F ';' '{print $0}' | "sort")
+	
+done
+
+if test -z "$data"; then
+    data=$in
+fi
+
+if test ! -z "$A"; then 
+    A="$A"
+    tmp=$(echo "$data" | awk -F ';' -v date="$A" '{if ($1 > date) {print $0}}')
+    data="$tmp"
+   
+fi
+
+if test ! -z "$B"; then 
+    BF="$B"
+    tmp=$(echo "$data" | awk -F ';' -v f="$BF" '{if($1 < f) {print $0}}')
+    data="$tmp"
+    
+fi
+
+if test ! -z "$W"; then
+	if [ "$W" -lt 0 ]; then
+		echo "error"
+		exit
+	fi
+fi
+
+
+
+if [ "$com" == "list-tick" ]; then
+	out=$(echo "$data" | awk -F ';' '!($2 in array){array[$2];if($2!="")print $2}' | "sort")
+	data="$out"
+
+elif [ "$com" == "profit" ]; then
+	out=$(echo "$data" | awk -F ';' '/buy/{b-=($4*$6)}/sell/{s+=($4*$6)}END{printf "%.2f",(s+b)}')
+	data="$out"
+
+elif [ "$com" == "pos" ]; then
+	out=$(echo "$data" | awk -F ';' '/buy/{a[$2]+=($6)}/sell/{a[$2]-=($6)}{b[$2]=$4}END{for (i in a) printf "%10-s %.2f\n" ,i,(a[i]*b[i])}')
+	tmp=$(echo "$out" | awk '{print $0}' | "sort" "-k2" "-n" "-r")
+	ln=$(echo "$out" | awk '{n=sprintf("%.2f", $2);if(length(n) > longest){long = length(n);long+=1}} END {print long}')
+	data=$(echo "$tmp" | awk -v ln="$ln" '{n=sprintf("%.2f", $2);printf("%9-s : %*s\n", $1, ln,n)}')
+	
+
+elif [ "$com" == "last-price" ]; then
+	out=$(echo "$data" | awk -F ';' '$2 {a[$2]=$4}END{for (i in a) printf "%s %1.2f\n" ,i,a[i]}' | "sort")
+	ln=$(echo "$out" | awk '{n=sprintf("%.2f", $2);if(length(n) > longest){long = length(n);long+=1}} END {print long}')
+	data=$(echo "$out" | awk -v ln="$ln" '{n=sprintf("%.2f", $2);printf("%9-s : %*s\n", $1, ln,n)}')
+	
+
+elif [ "$com" == "hist-ord" ]; then
+	out=$(echo "$data" | awk -F ';' '{a[$2]++}END{for(x in a)if(x!="") printf "%-10s %s\n", x,a[x]}' | "sort")
+	
+	if [ -z "$W" ]; then
+		posun=1
+	else
+		posun=$(echo "$out" | awk -v w="$W" 'BEGIN{a=0}{if($2>a)a=$2}END{print a/w}')
+	fi
+	new=$(echo "$out" | awk -v w=$posun 'function hist(n){ret = "";for(i=1;i<=n;i++){ret=ret"#"};return ret}{print $1,hist($2/w)}')
+	last=$(echo "$new" | awk '{printf("%9-s : %s\n", $1, $2)}')
+	data="$last"
+	
+
+
+
+elif [ "$com" == "graph-pos" ]; then
+	
+	out=$(echo "$data" | awk -F ';' '/buy/{a[$2]+=($6)}/sell/{a[$2]-=($6)}{b[$2]=$4}END{for (i in a) printf "%s  %.2f\n",i,(a[i]*b[i])}')
+	new=$(echo "$out" | awk -F '' '{print $0}' | "sort" "-k2" "-r")
+	
+	if [ -z "$W" ]; then
+		posun=1000
+	else
+		posun=$(echo "$out" | awk -v w="$W" 'BEGIN{a=0}{if($2>a)a=$2}END{print (a/w)}')
+	fi
+
+	final=$(echo "$new" | awk -v w=$posun 'function hist(n){ret = "";for(i=1;i<=n;i++){ret=ret"#"};return ret}{print $1,hist($2/w)}')
+
+
+
+	last=$(echo "$final" | awk '{printf("%9-s : %s\n", $1, $2)}' | "sort" )
+	data="$last"
+	
+fi
+
+echo "$data"
